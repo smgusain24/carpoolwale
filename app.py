@@ -5,8 +5,10 @@ from fastapi.responses import JSONResponse
 app = FastAPI()
 
 from application.users.views import router as users_router
+from application.ride.views import router as rides_router
 
 app.include_router(users_router)
+app.include_router(rides_router)
 
 @app.get("/health")
 def health():

@@ -1,4 +1,4 @@
-from typing import Callable, Any
+from typing import Callable, Any, Optional, List
 from fastapi import Request, HTTPException
 from pydantic import BaseModel
 from config.http_status import *
@@ -15,12 +15,21 @@ SECRET_KEY = "OJRuyUg7CMd6POJAy1jMfsXQPMtGpyB8"
 FERNET_KEY = "oIPE4NQAmag20i-zdK-rxILCp7DaiTfA-0K6-1QhJ1o="
 
 
+class EmergencyContact(BaseModel):
+    phone_no: str
+    name: str
+
 class UserDetails(BaseModel):
-    email: str
+    user_id: str
     is_active: int
-    is_admin: int
-    user_id: int
-    username: str
+    email: Optional[str] = None
+    phone_no: str
+    bio: Optional[str] = None
+    profile_picture_url: Optional[str] = None
+    first_name: str
+    last_name: str
+    emergency_contact: List[EmergencyContact]
+    is_verified: int
 
 
 class TokenData(BaseModel):
