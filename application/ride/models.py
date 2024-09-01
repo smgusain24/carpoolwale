@@ -1,6 +1,5 @@
 import hashlib
 from datetime import datetime
-from encodings.idna import ace_prefix
 from typing import List, Optional, Tuple
 
 from fastapi.requests import Request
@@ -73,7 +72,8 @@ class Ride:
         )
 
     async def create_ride(self):
-        self.ride_id = self._generate_unique_ride_id(self.driver['user_id'], self.start_datetime)
+        created_at = datetime.now()
+        self.ride_id = self._generate_unique_ride_id(self.driver['user_id'], self.start_datetime, created_at)
         ride = {
             "ride_id": self.ride_id,
             "publisher_id": self.driver['user_id'],
@@ -86,7 +86,7 @@ class Ride:
             "passengers": self.passengers,
             "additional_note": self.additional_note,
             "additional_stop": self.additional_stop,
-            "created_at": datetime.now(),
+            "created_at": created_at,
             "updated_at": None,
             "is_active": 1,
             "is_cancelled": 0
@@ -95,9 +95,11 @@ class Ride:
         logger.info({'msg': 'Ride Created', 'ride_id': ride['ride_id']})
 
     @staticmethod
-    def _generate_unique_ride_id(driver_user_id: str, start_datetime: datetime):
-        """Combination of driver user id, start datetime and creation datetime"""
-        raw_id = f"{driver_user_id}_{start_datetime.strftime('%d%m%Y%H%M%S')}_{datetime.now()}"
+    def _generate_unique_ride_id(driver_user_id: str, start_datetime: datetime, created_at: datetime) -> str:
+        """Combination of driver user id, start datetime and ride creation datetime"""
+
+        raw_id = (f"{driver_user_id}_{start_datetime.strftime('%d%m%Y%H%M%S')}"
+                  f"_{created_at.strftime('%d%m%Y%H%M%S')}_{datetime.now()}")
         return hashlib.sha256(raw_id.encode()).hexdigest()
 
 

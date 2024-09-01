@@ -1,12 +1,16 @@
 from typing import Dict, Optional, Any, List, Union
 
-from pymongo import MongoClient
+from pymongo import MongoClient, GEOSPHERE
 
 from config.app_logger import logger
 
 MONGO_URL="mongodb+srv://smgusain:SMGan1957@carpoolwale.nupzh.mongodb.net/"
 mongo_client = MongoClient(MONGO_URL)
 db = mongo_client['carpoolwaale']
+rides_collection = db['rides']
+
+rides_collection.create_index([("origin", GEOSPHERE)])
+rides_collection.create_index([("destination", GEOSPHERE)])
 
 
 def fetch_documents(
@@ -37,6 +41,8 @@ def fetch_documents(
         projection_dict = None
         if projection:
             projection_dict = {field: 1 for field in projection}
+            if "_id" not in projection:
+                projection_dict["_id"] = 0
 
         cursor = collection.find(filter_query, projection_dict)
 
