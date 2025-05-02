@@ -1,3 +1,5 @@
+import secrets
+import uuid
 from typing import Callable, Any, Optional, List
 from fastapi import Request, HTTPException
 from pydantic import BaseModel
@@ -8,6 +10,8 @@ from datetime import datetime, timedelta, timezone
 from functools import wraps
 import jwt
 from cryptography.fernet import Fernet
+
+from config.postgresql import db
 from config.redis_config import redis_db
 
 
@@ -68,29 +72,52 @@ def invalidate_users_RT(user_id) -> None:
 
 def generate_jwt_token(user_details, time_in_minutes, token_type='access') -> str:
     try:
-        # Generate JWT tokens (Access Token / Refresh Token)
         user_id = user_details['user_id']
-        token = jwt.encode({
-            "user_details": user_details,
+
+        # Create a unique token identifier
+        jti = str(uuid.uuid4())
+
+        # Current timestamp
+        now = datetime.now(tz=timezone.utc)
+
+        # Build standard JWT payload
+        payload = {
+            "sub": str(user_id),
+            "iat": now,
+            "exp": now + timedelta(minutes=time_in_minutes),
+            "jti": jti,
             "type": token_type,
-            "exp": datetime.now(tz=timezone.utc) + timedelta(minutes=time_in_minutes)
-        },
+            "user_details": user_details
+        }
+
+        # Generate the JWT
+        token = jwt.encode(
+            payload,
             SECRET_KEY,
-            "HS256"
+            algorithm="HS256"
         )
+
+        # Handle refresh token storage
         if token_type == 'refresh':
-            f = Fernet(FERNET_KEY)
-            encrypted_token = f.encrypt(token.encode())  # Encrypt token to store in redis
 
-            # invalidate_users_RT(user_id)
-            obj = {
-                "refresh_token": str(encrypted_token)
-            }
+            # Store in database (instead of Redis)
+            store_refresh_token_in_db(
+                user_id=user_id,
+                refresh_token=token,
+                token_jti=jti,
+                expires_at=payload["exp"]
+            )
 
-            redis_db.set(key=f"USER:{user_id}", value=obj)
+
+
         return token
+
+    except jwt.PyJWTError as e:
+        logger.error(f"JWT encoding error: {e}", exc_info=True)
+        raise
     except Exception as e:
-        logger.exception(e, exc_info=True, stack_info=True)
+        logger.exception(f"Token generation error: {e}", exc_info=True)
+        raise
 
 
 def access_token_required(f: Callable[..., Any]) -> Callable[..., Any]:
@@ -190,3 +217,41 @@ def is_hacker(user_id, token_user_id) -> bool:
         return False
     except Exception as e:
         logger.exception(e, exc_info=True, stack_info=True)
+
+
+def store_refresh_token_in_db(user_id, refresh_token, token_jti, expires_at):
+    """
+    Store a refresh token in the database and invalidate existing tokens.
+    Implements a single-session policy where only one active session per user is allowed.
+
+    Parameters:
+    - user_id: ID of the user
+    - refresh_token: The refresh token to store
+    - token_jti: Unique ID of jwt token
+    - expires_at: Expiration datetime of the token
+    """
+    try:
+
+        query = """
+                UPDATE user_sessions 
+                SET revoked = TRUE, revoked_at = NOW(), is_active = False 
+                WHERE user_id = %s AND revoked = FALSE
+        """
+        db.execute_update_query(query, params=(user_id,))
+
+        # Insert the new refresh token
+        query = """
+                INSERT INTO user_sessions 
+                (user_id, refresh_token, token_jti, expires_at)
+                VALUES (%s, %s, %s, %s)
+            """
+
+        params = (user_id, refresh_token, token_jti, expires_at)
+
+        session_id = db.execute_insert_query(query=query, params=params, return_id=True)
+
+        return session_id
+
+    except Exception as e:
+        logger.exception(f"Error storing refresh token: {e}", exc_info=True)
+        raise
