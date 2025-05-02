@@ -16,7 +16,6 @@ from application.ride.models import Ride
 from config.app_logger import logger
 from config.auth import access_token_required
 from application.constants import _VERSION
-from config.mongo_db import fetch_documents
 
 router = APIRouter(prefix=f"/{_VERSION}/rides", tags=["Rides"])
 
@@ -176,14 +175,7 @@ async def view_rides(request: Request):
         projection = ['_id', 'ride_id',  'publisher_id', 'origin', 'destination', 'start_datetime',
                       'end_datetime', 'available_seats', 'cost_per_seat']
         # Fetch rides from the database
-        rides = fetch_documents(
-            collection_name="rides",
-            filter_query=filters,
-            sort_by=[("start_datetime", 1)],
-            limit=10,
-            projection=projection
-        )
-
+        rides = []
         for ride in rides:
             ride['_id'] = str(ride['_id'])
             ride['start_datetime'] = ride['start_datetime'].strftime("%d %B %Y")
