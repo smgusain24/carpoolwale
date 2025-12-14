@@ -6,9 +6,11 @@ app = FastAPI()
 
 from application.users.views import router as users_router
 from application.ride.views import router as rides_router
+from application.vehicles.views import router as vehicles_router
 
 app.include_router(users_router)
 app.include_router(rides_router)
+app.include_router(vehicles_router)
 
 @app.get("/health")
 def health():

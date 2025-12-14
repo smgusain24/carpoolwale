@@ -149,9 +149,6 @@ CREATE TABLE user_sessions (
     revoked_at TIMESTAMP,
     device_info TEXT,
     ip_address VARCHAR(45),
-    token_jti varchar(36) NOT NULL,
-	revoked bool DEFAULT false NULL,
-	revoked_at timestamp NULL,
     UNIQUE(refresh_token)
 );
 

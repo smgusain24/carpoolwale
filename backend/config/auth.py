@@ -1,8 +1,10 @@
+import os
 import secrets
 import uuid
 from typing import Callable, Any, Optional, List
 from fastapi import Request, HTTPException
 from pydantic import BaseModel
+from dotenv import load_dotenv
 from config.http_status import *
 from config.app_logger import logger
 import bcrypt
@@ -14,9 +16,10 @@ from cryptography.fernet import Fernet
 from config.postgresql import db
 from config.redis_config import redis_db
 
+load_dotenv()
 
-SECRET_KEY = "OJRuyUg7CMd6POJAy1jMfsXQPMtGpyB8"
-FERNET_KEY = "oIPE4NQAmag20i-zdK-rxILCp7DaiTfA-0K6-1QhJ1o="
+SECRET_KEY = os.getenv("JWT_SECRET_KEY", "change_this_secret_key_in_production")
+FERNET_KEY = os.getenv("FERNET_KEY", "oIPE4NQAmag20i-zdK-rxILCp7DaiTfA-0K6-1QhJ1o=")
 
 
 class EmergencyContact(BaseModel):

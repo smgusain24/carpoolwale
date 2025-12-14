@@ -1,16 +1,30 @@
+import os
 from typing import Dict, Optional, Any, List, Union
 
 from pymongo import MongoClient, GEOSPHERE
+from dotenv import load_dotenv
 
 from config.app_logger import logger
 
-MONGO_URL="mongodb+srv://smgusain:SMGan1957@carpoolwale.nupzh.mongodb.net/"
-mongo_client = MongoClient(MONGO_URL)
-db = mongo_client['carpoolwaale']
-rides_collection = db['rides']
+load_dotenv()
 
-rides_collection.create_index([("origin", GEOSPHERE)])
-rides_collection.create_index([("destination", GEOSPHERE)])
+MONGO_URL = os.getenv("MONGO_URL", "")
+
+# MongoDB is optional (legacy) - only initialize if URL is provided
+mongo_client = None
+db = None
+rides_collection = None
+
+if MONGO_URL:
+    try:
+        mongo_client = MongoClient(MONGO_URL)
+        db = mongo_client['carpoolwaale']
+        rides_collection = db['rides']
+        rides_collection.create_index([("origin", GEOSPHERE)])
+        rides_collection.create_index([("destination", GEOSPHERE)])
+        logger.info("MongoDB connected successfully")
+    except Exception as e:
+        logger.warning(f"MongoDB connection failed (optional): {e}")
 
 
 def fetch_documents(

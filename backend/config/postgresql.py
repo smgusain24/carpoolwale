@@ -1,10 +1,14 @@
+import os
 import time
 
 import psycopg2
 from psycopg2 import pool
 from typing import List, Dict, Any, Optional, Tuple, Union
 from contextlib import contextmanager
+from dotenv import load_dotenv
 from config.app_logger import logger
+
+load_dotenv()
 
 
 class PostgresDB:
@@ -15,13 +19,13 @@ class PostgresDB:
 
 
     def __init__(self, config=None):
-        _default_schema = "dev"
+        _default_schema = os.getenv("POSTGRES_SCHEMA", "dev")
         self.config = config or {
-            "dbname": "carpoolwale",
-            "user": "postgres",
-            "password": "admin1234567",
-            "host": "localhost",
-            "port": "5432"
+            "dbname": os.getenv("POSTGRES_DB", "carpoolwale"),
+            "user": os.getenv("POSTGRES_USER", "postgres"),
+            "password": os.getenv("POSTGRES_PASSWORD", ""),
+            "host": os.getenv("POSTGRES_HOST", "localhost"),
+            "port": os.getenv("POSTGRES_PORT", "5432")
         }
         try:
             self.connection_pool = psycopg2.pool.SimpleConnectionPool(
@@ -57,8 +61,8 @@ class PostgresDB:
         """
         conn = None
         try:
-
-
+            conn = self.connection_pool.getconn()
+            self._set_default_schema(conn, "dev")
             yield conn
         except Exception as e:
             logger.error(f"Connection error: {e}", exc_info=True)

@@ -183,3 +183,83 @@ def authorize_user(user_details: dict) -> (str, str):
 
 def generate_hashed_user_id(phone_no: str) -> str:
     return hashlib.sha256(phone_no.encode()).hexdigest()
+
+
+def revoke_user_session(session_id: int) -> bool:
+    """Revoke a specific user session"""
+    try:
+        query = """
+            UPDATE user_sessions
+            SET revoked = TRUE, revoked_at = NOW()
+            WHERE id = %s
+        """
+        db.execute_update_query(query, (session_id,))
+        return True
+    except Exception as e:
+        logger.error(f"Error revoking session: {e}", exc_info=True)
+        return False
+
+
+def revoke_all_user_sessions(user_id: int) -> bool:
+    """Revoke all sessions for a user"""
+    try:
+        query = """
+            UPDATE user_sessions
+            SET revoked = TRUE, revoked_at = NOW()
+            WHERE user_id = %s AND revoked = FALSE
+        """
+        db.execute_update_query(query, (user_id,))
+        logger.info(f"All sessions revoked for user {user_id}")
+        return True
+    except Exception as e:
+        logger.error(f"Error revoking all sessions: {e}", exc_info=True)
+        return False
+
+
+def get_user_by_id(user_id: int) -> dict:
+    """Get user details by user ID"""
+    try:
+        query = """
+            SELECT
+                id, first_name, last_name, country_code, phone_no, email,
+                bio, profile_picture_url, created_at, updated_at, last_login,
+                is_active, is_verified
+            FROM users
+            WHERE id = %s
+            LIMIT 1
+        """
+        result = db.execute_select_query(query, params=(user_id,))
+        return result[0] if result else {}
+    except Exception as e:
+        logger.error(f"Error getting user by ID: {e}", exc_info=True)
+        return {}
+
+
+def update_user_profile(user_id: int, updates: dict) -> bool:
+    """Update user profile fields"""
+    try:
+        if not updates:
+            return False
+
+        # Build dynamic SET clause
+        set_clauses = []
+        params = []
+        for key, value in updates.items():
+            set_clauses.append(f"{key} = %s")
+            params.append(value)
+
+        set_clauses.append("updated_at = NOW()")
+        params.append(user_id)
+
+        query = f"""
+            UPDATE users
+            SET {', '.join(set_clauses)}
+            WHERE id = %s
+        """
+
+        db.execute_update_query(query, tuple(params))
+        logger.info(f"User {user_id} profile updated: {list(updates.keys())}")
+        return True
+    except Exception as e:
+        logger.error(f"Error updating user profile: {e}", exc_info=True)
+        return False

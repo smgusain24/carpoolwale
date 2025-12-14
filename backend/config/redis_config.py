@@ -1,20 +1,23 @@
+import os
 import json
 
 import redis
+from dotenv import load_dotenv
 from config.app_logger import logger
 
+load_dotenv()
 
 MINUTE = 60
 MONTHLY_TTL = 30 * 86400
 WEEKLY_TTL = 7 * 86400
 DAILY_TTL = 86400
 
-host = "127.0.0.1"
+host = os.getenv("REDIS_HOST", "127.0.0.1")
 username = ""
-password = ""
-port = "6379"
-db_index = 0
-redis_ssl = False
+password = os.getenv("REDIS_PASSWORD", "")
+port = os.getenv("REDIS_PORT", "6379")
+db_index = int(os.getenv("REDIS_DB", "0"))
+redis_ssl = os.getenv("REDIS_SSL", "false").lower() == "true"
 
 
 
