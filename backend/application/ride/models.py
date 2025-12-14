@@ -1,34 +1,85 @@
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Literal
 from datetime import datetime
 import hashlib
 
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator, model_validator, Field
 from config.app_logger import logger
 from config.postgresql import db
+
+
+def validate_coordinates(lat: float, lng: float, field_name: str = "coordinates") -> None:
+    """Validate latitude and longitude ranges"""
+    if not (-90 <= lat <= 90):
+        raise ValueError(f"{field_name} latitude must be between -90 and 90")
+    if not (-180 <= lng <= 180):
+        raise ValueError(f"{field_name} longitude must be between -180 and 180")
 
 
 # Pydantic models for request/response validation
 class RideCreate(BaseModel):
     origin: Tuple[float, float]
     destination: Tuple[float, float]
-    available_seats: int
-    cost_per_seat: float
-    additional_note: Optional[str] = None
-    additional_stop: Optional[List[Tuple[float, float]]] = None
+    available_seats: int = Field(..., ge=1, le=50)
+    cost_per_seat: float = Field(..., ge=0, le=100000)
+    additional_note: Optional[str] = Field(None, max_length=500)
+    additional_stop: Optional[List[Tuple[float, float]]] = Field(None, max_length=10)
     start_datetime: datetime
     end_datetime: datetime
+    vehicle_id: Optional[int] = Field(None, ge=1)
+
+    @field_validator('origin')
+    @classmethod
+    def validate_origin(cls, v):
+        validate_coordinates(v[0], v[1], "origin")
+        return v
+
+    @field_validator('destination')
+    @classmethod
+    def validate_destination(cls, v):
+        validate_coordinates(v[0], v[1], "destination")
+        return v
+
+    @field_validator('additional_stop')
+    @classmethod
+    def validate_additional_stops(cls, v):
+        if v:
+            for i, stop in enumerate(v):
+                validate_coordinates(stop[0], stop[1], f"additional_stop[{i}]")
+        return v
+
+    @model_validator(mode='after')
+    def validate_datetime_range(self):
+        if self.end_datetime <= self.start_datetime:
+            raise ValueError("end_datetime must be after start_datetime")
+        if self.start_datetime < datetime.now():
+            raise ValueError("start_datetime cannot be in the past")
+        return self
 
 
 class RideRequest(BaseModel):
-    ride_id: str
-    seats_requested: int = 1
+    ride_id: str = Field(..., min_length=1, max_length=100)
+    seats_requested: int = Field(1, ge=1, le=50)
     pickup_location: Optional[Tuple[float, float]] = None
     dropoff_location: Optional[Tuple[float, float]] = None
 
+    @field_validator('pickup_location')
+    @classmethod
+    def validate_pickup(cls, v):
+        if v:
+            validate_coordinates(v[0], v[1], "pickup_location")
+        return v
+
+    @field_validator('dropoff_location')
+    @classmethod
+    def validate_dropoff(cls, v):
+        if v:
+            validate_coordinates(v[0], v[1], "dropoff_location")
+        return v
+
 
 class RideRequestAction(BaseModel):
-    request_id: int
-    action: str  # 'accept' or 'reject'
+    request_id: int = Field(..., ge=1)
+    action: Literal['accept', 'reject']
 
 
 # Database operations class
@@ -44,7 +95,8 @@ class Ride:
         cost_per_seat: float = 0.0,  # Cost per seat charged
         additional_note: str = "",  # Additional note
         additional_stop: List[Optional[Tuple[float, float]]] = () ,  # List of coordinates of additional stops
-        ride_id: str = None  # Optional: Used when a rider is requesting or viewing a ride
+        ride_id: str = None,  # Optional: Used when a rider is requesting or viewing a ride
+        vehicle_id: Optional[int] = None  # Optional: Vehicle to be used for the ride
     ):
         self.driver = driver
         self.origin = origin
@@ -59,10 +111,11 @@ class Ride:
         self.is_active = True
         self.is_cancelled = False
         self.ride_id = ride_id
+        self.vehicle_id = vehicle_id
 
     @classmethod
     def create_for_driver(cls, driver, origin, destination, start_datetime, end_datetime, available_seats,
-                          cost_per_seat, additional_note="", additional_stop=None):
+                          cost_per_seat, additional_note="", additional_stop=None, vehicle_id=None):
         return cls(
             driver=driver,
             origin=origin,
@@ -72,7 +125,8 @@ class Ride:
             available_seats=available_seats,
             cost_per_seat=cost_per_seat,
             additional_note=additional_note,
-            additional_stop=additional_stop
+            additional_stop=additional_stop,
+            vehicle_id=vehicle_id
         )
 
     @staticmethod
@@ -200,8 +254,6 @@ class Ride:
         ) RETURNING id;
         """
 
-        vehicle_id = getattr(self, 'vehicle_id')
-
         params = (
             self.ride_id,
             self.driver['user_id'],
@@ -215,7 +267,7 @@ class Ride:
             created_at,
             True,
             False,
-            vehicle_id
+            self.vehicle_id
         )
 
         ride_db_id = db.execute_insert_query(insert_ride_query, params, return_id=True)
@@ -271,8 +323,13 @@ class Ride:
         return results[0] if results else None
 
     @staticmethod
-    def get_user_rides(user_id: int, status: str = 'active') -> List[dict]:
-        """Get all rides published by a user"""
+    def get_user_rides(user_id: int, status: str = 'active', page: int = 1, per_page: int = 20) -> dict:
+        """Get all rides published by a user with pagination"""
+        # Validate status to prevent invalid values
+        valid_statuses = {'active', 'completed', 'cancelled', 'all'}
+        if status not in valid_statuses:
+            status = 'active'
+
         base_query = """
             SELECT
                 r.id, r.ride_id, r.publisher_id,
@@ -296,9 +353,18 @@ class Ride:
         elif status == 'cancelled':
             base_query += " AND r.is_cancelled = TRUE"
 
+        # Get total count for pagination
+        count_query = f"SELECT COUNT(*) as total FROM ({base_query}) as subquery"
+        count_result = db.execute_select_query(count_query, (user_id,))
+        total = count_result[0]['total'] if count_result else 0
+
         base_query += " ORDER BY r.start_datetime DESC"
 
-        results = db.execute_select_query(base_query, (user_id,))
+        # Add pagination
+        offset = (page - 1) * per_page
+        base_query += " LIMIT %s OFFSET %s"
+
+        results = db.execute_select_query(base_query, (user_id, per_page, offset))
 
         formatted = []
         for r in results:
@@ -316,11 +382,23 @@ class Ride:
                 "pending_requests": r['pending_requests'],
                 "confirmed_passengers": r['confirmed_passengers']
             })
-        return formatted
+
+        return {
+            "items": formatted,
+            "total": total,
+            "page": page,
+            "per_page": per_page,
+            "total_pages": (total + per_page - 1) // per_page if total > 0 else 0
+        }
 
     @staticmethod
-    def get_user_bookings(user_id: int, status: str = 'all') -> List[dict]:
-        """Get all ride bookings for a user as passenger"""
+    def get_user_bookings(user_id: int, status: str = 'all', page: int = 1, per_page: int = 20) -> dict:
+        """Get all ride bookings for a user as passenger with pagination"""
+        # Validate status to prevent SQL injection
+        valid_statuses = {'all', 'pending', 'confirmed', 'rejected', 'cancelled'}
+        if status not in valid_statuses:
+            status = 'all'
+
         base_query = """
             SELECT
                 rp.id as request_id, rp.status, rp.seats_requested, rp.created_at as requested_at,
@@ -338,12 +416,25 @@ class Ride:
             WHERE rp.passenger_id = %s
         """
 
+        params = [user_id]
+
         if status != 'all':
-            base_query += f" AND rp.status = '{status}'"
+            base_query += " AND rp.status = %s"
+            params.append(status)
+
+        # Get total count for pagination
+        count_query = f"SELECT COUNT(*) as total FROM ({base_query}) as subquery"
+        count_result = db.execute_select_query(count_query, tuple(params))
+        total = count_result[0]['total'] if count_result else 0
 
         base_query += " ORDER BY r.start_datetime DESC"
 
-        results = db.execute_select_query(base_query, (user_id,))
+        # Add pagination
+        offset = (page - 1) * per_page
+        base_query += " LIMIT %s OFFSET %s"
+        params.extend([per_page, offset])
+
+        results = db.execute_select_query(base_query, tuple(params))
 
         formatted = []
         for r in results:
@@ -361,7 +452,14 @@ class Ride:
                 "cost_per_seat": float(r['cost_per_seat']) if r['cost_per_seat'] else 0,
                 "ride_cancelled": r['ride_cancelled']
             })
-        return formatted
+
+        return {
+            "items": formatted,
+            "total": total,
+            "page": page,
+            "per_page": per_page,
+            "total_pages": (total + per_page - 1) // per_page if total > 0 else 0
+        }
 
     @staticmethod
     def get_ride_requests(ride_db_id: int) -> List[dict]:

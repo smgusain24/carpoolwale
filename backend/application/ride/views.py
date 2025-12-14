@@ -11,6 +11,7 @@ from starlette import status
 
 from application.common import epoch_to_datetime
 from application.ride.models import Ride, RideCreate, RideRequest, RideRequestAction
+from application.vehicles.utilities import get_vehicle_by_id
 from config.app_logger import logger
 from config.auth import access_token_required
 from application.constants import _VERSION
@@ -23,8 +24,6 @@ router = APIRouter(prefix=f"/{_VERSION}/rides", tags=["Rides"])
 @access_token_required
 async def publish_ride(request: Request):
     """
-    Publish a ride by creating a new ride document in the database with the provided data.
-
     Parameters:
     - `request` (Request): The incoming request object.
 
@@ -49,6 +48,19 @@ async def publish_ride(request: Request):
             ride_data = RideCreate(**data)  # Use Pydantic for validation
         except ValidationError as e:
             raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(e))
+
+        # Validate vehicle ownership if vehicle_id is provided
+        if ride_data.vehicle_id:
+            vehicle = get_vehicle_by_id(ride_data.vehicle_id)
+            if not vehicle:
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Vehicle not found")
+            if vehicle['user_id'] != current_user['user_id']:
+                raise HTTPException(status_code=status.HTTP_403_FORBIDDEN,
+                                    detail="You can only use your own vehicles")
+            # Validate that available_seats doesn't exceed vehicle capacity
+            if ride_data.available_seats > vehicle['max_capacity']:
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
+                                    detail=f"Available seats ({ride_data.available_seats}) exceeds vehicle capacity ({vehicle['max_capacity']})")
 
         ride = Ride.create_for_driver(
             driver=current_user,
@@ -169,10 +181,12 @@ async def view_rides(request: Request):
             - epoch_date: Date in epoch format
             - origin: JSON [lat, lng]
             - destination: JSON [lat, lng]
-            - vicinity: Radius in km (default: 10)
+            - vicinity: Radius in km (default: 10, max: 100)
+            - page: Page number (default: 1)
+            - per_page: Items per page (default: 20, max: 100)
 
     Returns:
-        JSONResponse: A JSON response containing the list of rides.
+        JSONResponse: A JSON response containing the list of rides with pagination.
     """
     try:
         current_user = request.state.user_details
@@ -188,9 +202,30 @@ async def view_rides(request: Request):
         origin: List[float] = json.loads(data['origin'])
         destination: List[float] = json.loads(data['destination'])
 
+        # Validate coordinates
+        if len(origin) != 2 or len(destination) != 2:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
+                                detail="Origin and destination must be [lat, lng] arrays")
+
+        origin_lat, origin_lng = origin[0], origin[1]
+        dest_lat, dest_lng = destination[0], destination[1]
+
+        # Validate latitude (-90 to 90) and longitude (-180 to 180)
+        if not (-90 <= origin_lat <= 90) or not (-180 <= origin_lng <= 180):
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
+                                detail="Invalid origin coordinates")
+        if not (-90 <= dest_lat <= 90) or not (-180 <= dest_lng <= 180):
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
+                                detail="Invalid destination coordinates")
+
         # Convert vicinity to integer (in meters for ST_DWithin)
-        vicinity_km: int = int(data.get('vicinity', 10))
+        vicinity_km: int = min(100, max(1, int(data.get('vicinity', 10))))
         vicinity_meters = vicinity_km * 1000
+
+        # Pagination parameters
+        page = max(1, int(data.get('page', 1)))
+        per_page = min(100, max(1, int(data.get('per_page', 20))))
+        offset = (page - 1) * per_page
 
         # Build start and end datetime for the day
         start_of_day = datetime.combine(date, time.min)
@@ -200,23 +235,8 @@ async def view_rides(request: Request):
         if date == datetime.now().date():
             start_of_day = datetime.now()
 
-        # Query rides using PostGIS geospatial functions
-        query = """
-            SELECT
-                r.id,
-                r.ride_id,
-                r.publisher_id,
-                ST_Y(r.origin::geometry) as origin_lat,
-                ST_X(r.origin::geometry) as origin_lng,
-                ST_Y(r.destination::geometry) as destination_lat,
-                ST_X(r.destination::geometry) as destination_lng,
-                r.start_datetime,
-                r.end_datetime,
-                r.available_seats,
-                r.cost_per_seat,
-                r.additional_note,
-                u.first_name,
-                u.last_name
+        # Base query for counting and fetching
+        base_conditions = """
             FROM rides r
             JOIN users u ON r.publisher_id = u.id
             WHERE r.is_active = TRUE
@@ -234,21 +254,44 @@ async def view_rides(request: Request):
                   ST_SetSRID(ST_MakePoint(%s, %s), 4326)::geography,
                   %s
               )
-            ORDER BY r.start_datetime ASC
         """
 
-        # origin and destination are [lat, lng], PostGIS uses (lng, lat)
-        origin_lat, origin_lng = origin[0], origin[1]
-        dest_lat, dest_lng = destination[0], destination[1]
-
-        params = (
+        base_params = (
             start_of_day,
             end_of_day,
             origin_lng, origin_lat, vicinity_meters,
             dest_lng, dest_lat, vicinity_meters
         )
 
+        # Get total count
         from config.postgresql import db
+        count_query = f"SELECT COUNT(*) as total {base_conditions}"
+        count_result = db.execute_select_query(count_query, base_params)
+        total = count_result[0]['total'] if count_result else 0
+
+        # Query rides using PostGIS geospatial functions
+        query = f"""
+            SELECT
+                r.id,
+                r.ride_id,
+                r.publisher_id,
+                ST_Y(r.origin::geometry) as origin_lat,
+                ST_X(r.origin::geometry) as origin_lng,
+                ST_Y(r.destination::geometry) as destination_lat,
+                ST_X(r.destination::geometry) as destination_lng,
+                r.start_datetime,
+                r.end_datetime,
+                r.available_seats,
+                r.cost_per_seat,
+                r.additional_note,
+                u.first_name,
+                u.last_name
+            {base_conditions}
+            ORDER BY r.start_datetime ASC
+            LIMIT %s OFFSET %s
+        """
+
+        params = base_params + (per_page, offset)
         rides = db.execute_select_query(query, params)
 
         # Format the response
@@ -268,7 +311,16 @@ async def view_rides(request: Request):
                 "additional_note": ride['additional_note']
             })
 
-        return JSONResponse(content={"rides": formatted_rides}, status_code=status.HTTP_200_OK)
+        return JSONResponse(
+            content={
+                "items": formatted_rides,
+                "total": total,
+                "page": page,
+                "per_page": per_page,
+                "total_pages": (total + per_page - 1) // per_page if total > 0 else 0
+            },
+            status_code=status.HTTP_200_OK
+        )
 
     except KeyError as e:
         logger.error(f"Missing required parameter: {e}", exc_info=True)
@@ -276,6 +328,13 @@ async def view_rides(request: Request):
             content={"error": f"Missing required parameter: {str(e)}"},
             status_code=status.HTTP_400_BAD_REQUEST
         )
+    except ValueError:
+        return JSONResponse(
+            content={"error": "Invalid parameter values"},
+            status_code=status.HTTP_400_BAD_REQUEST
+        )
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(e, exc_info=True)
         return JSONResponse(
@@ -292,6 +351,8 @@ async def my_rides(request: Request):
 
     Query params:
         - status: 'active', 'completed', 'cancelled', or 'all' (default: 'active')
+        - page: Page number (default: 1)
+        - per_page: Items per page (default: 20, max: 100)
     """
     try:
         current_user = request.state.user_details
@@ -300,11 +361,18 @@ async def my_rides(request: Request):
 
         data = dict(request.query_params)
         ride_status = data.get('status', 'active')
+        page = max(1, int(data.get('page', 1)))
+        per_page = min(100, max(1, int(data.get('per_page', 20))))
 
-        rides = Ride.get_user_rides(current_user['user_id'], ride_status)
+        result = Ride.get_user_rides(current_user['user_id'], ride_status, page, per_page)
 
-        return JSONResponse(content={"rides": rides}, status_code=status.HTTP_200_OK)
+        return JSONResponse(content=result, status_code=status.HTTP_200_OK)
 
+    except ValueError:
+        return JSONResponse(
+            content={"error": "Invalid pagination parameters"},
+            status_code=status.HTTP_400_BAD_REQUEST
+        )
     except Exception as e:
         logger.error(e, exc_info=True)
         return JSONResponse(
@@ -320,7 +388,9 @@ async def my_bookings(request: Request):
     Get all rides where the current user is a passenger (requested/confirmed).
 
     Query params:
-        - status: 'pending', 'confirmed', 'rejected', or 'all' (default: 'all')
+        - status: 'pending', 'confirmed', 'rejected', 'cancelled', or 'all' (default: 'all')
+        - page: Page number (default: 1)
+        - per_page: Items per page (default: 20, max: 100)
     """
     try:
         current_user = request.state.user_details
@@ -329,11 +399,18 @@ async def my_bookings(request: Request):
 
         data = dict(request.query_params)
         booking_status = data.get('status', 'all')
+        page = max(1, int(data.get('page', 1)))
+        per_page = min(100, max(1, int(data.get('per_page', 20))))
 
-        bookings = Ride.get_user_bookings(current_user['user_id'], booking_status)
+        result = Ride.get_user_bookings(current_user['user_id'], booking_status, page, per_page)
 
-        return JSONResponse(content={"bookings": bookings}, status_code=status.HTTP_200_OK)
+        return JSONResponse(content=result, status_code=status.HTTP_200_OK)
 
+    except ValueError:
+        return JSONResponse(
+            content={"error": "Invalid pagination parameters"},
+            status_code=status.HTTP_400_BAD_REQUEST
+        )
     except Exception as e:
         logger.error(e, exc_info=True)
         return JSONResponse(
@@ -396,10 +473,6 @@ async def respond_to_request(request: Request):
             action_data = RideRequestAction(**data)
         except ValidationError as e:
             raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(e))
-
-        if action_data.action not in ['accept', 'reject']:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
-                                detail="Action must be 'accept' or 'reject'")
 
         # Get the request details
         ride_request = Ride.get_request_by_id(action_data.request_id)
